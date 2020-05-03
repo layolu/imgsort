@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+
+if [ "${IMAGE_VIEWER+x}" ]; then
+	IMGVIEWER=${IMAGE_VIEWER}
+elif hash imgcat 2> /dev/null; then
+	IMGVIEWER=imgcat
+elif hash img2sixel 2> /dev/null; then
+	IMGVIEWER=img2sixel
+fi
+
+THUMB_SIZE=256
+KEYS=()
+VALUES=()
+ACTIONS=()
+DEFAULT_ACTION='cp $file $value'
+
+img2thumb () {
+	if [[ ${THUMB_SIZE} -gt 0 ]] && hash convert 2>/dev/null; then
+		# if imagemagick is installed, output thumbnail of input file to stdout
+		convert "$1" -thumbnail ${THUMB_SIZE}x${THUMB_SIZE} -
+	else
+		# simply send the file to stdout
+		cat "$1"
+	fi
+}
+
+parse_keys () {
+	IFS=, read -ra keys_array <<< "$1"
+	for key_arg in "${keys_array[@]}"; do
+		IFS=: read -ra props <<< "$key_arg"
+		if [[ ${#props[@]} -lt 2 ]]; then
+			echo "Error: rules must have key and value."
+			exit 1
+		else
+			KEYS+=(${props[0]})
+			VALUES+=(${props[1]})
+			if [[ ${props[2]+x} ]]; then 
+				ACTIONS+=("${props[2]}")
+			else	
+				ACTIONS+=("${DEFAULT_ACTION}")
+			fi
+		fi
+	done
+}
+
+add_delete_key () {
+	key=$1
+	KEYS+=($key)
+	VALUES+=('DELETE')
+        ACTIONS+=('rm $file')
+}
+
+prompt () {
+	file=$1
+        if [[ ${RESUME_FROM+x} ]]; then
+		if [[ "$file" != "${RESUME_FROM}" ]]; then
+			#echo "Skip file $file"
+			return
+		else
+			unset RESUME_FROM
+		fi
+	fi
+	echo "$file"
+	img2thumb "$1" | eval $IMGVIEWER
+	
+	for ((i = 0; i < ${#KEYS[@]}; i++)) {
+		echo -n "${KEYS[i]}) ${VALUES[i]}, "
+	}
+
+        read -n 1 -p "other) skip ?: " key < /dev/tty; echo
+	for ((i = 0; i < ${#KEYS[@]}; i++)) {
+		if [[ $key = ${KEYS[i]} ]]; then
+			value=${VALUES[i]}
+			action=${ACTIONS[i]}
+			echo -n "Action: $(eval echo $action)"
+
+			if [[ DRY_RUN -ne 1 ]]; then
+				eval $action
+				echo " Done."
+			else
+				echo " (dry-run)"
+			fi
+			break
+		fi
+	}
+	if ((i == ${#KEYS[@]})); then
+		echo "Skipped."
+	fi
+        echo '----------------------------------------'
+}
+
+do_sorting () {
+	for arg; do
+		if [ -d "$arg" ]; then # a directory
+			IFS=$'\n'
+			find "$arg" -type f -a \( -name '*.jpg' -o -name '*.jpeg' -o -name '*.png' -o -name '*.gif' -o -name '*.bmp' \) \
+			       	| while read file; do prompt "$file"; done
+		elif [ -f "$arg" ]; then # a file
+			prompt "$arg"
+		else
+			echo "Error: path $arg is not found!"
+			exit 1
+		fi
+	done
+}
+
+quit () {
+	exit 0
+}
+
+usage () {
+	echo "$0 [-i image_viewer_cmd] [-t thumbnail_size] [-k 'key1:value1,key2:value2[,...]'] [-m] [-a custom_action_cmd ] [-D key_to_delete_file] [-r resume_from_file ] [-d] [-h] dir_path_or_glob"
+	exit 1
+}
+
+
+while getopts 'i:t:a:mk:r:D:dh' opt; do
+	case $opt in
+		i) IMGVIEWER="$OPTARG" ;;
+		t) THUMB_SIZE="$OPTARG" ;;
+		a) DEFAULT_ACTION="$OPTARG" ;;
+		m) DEFAULT_ACTION='mv $file $value' ;;
+		k) KEYS_ARG="$OPTARG" ;;
+		D) DELETE_KEY="$OPTARG" ;;
+		r) RESUME_FROM="$OPTARG" ;;
+		d) DRY_RUN=1 ;;
+		h) usage ;;
+	esac
+done
+
+parse_keys $KEYS_ARG
+if [[ ${DELETE_KEY+x} ]]; then
+	add_delete_key $DELETE_KEY
+fi
+
+shift $((OPTIND - 1))
+
+if [[ "$#" -eq 0 || $1 = '-' ]]; then
+	while read line; do
+		do_sorting $line
+	done
+else
+	do_sorting $@
+fi
+
+echo "Finished."
